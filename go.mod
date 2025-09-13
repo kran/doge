@@ -1,4 +1,4 @@
-module doge
+module github.com/kran/doge
 
 go 1.24.2
 

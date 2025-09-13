@@ -258,7 +258,7 @@ func (d *Duck) AddInsertMap(table string, cols Params) *Duck {
 	columns := make([]string, len(names))
 	marks := make([]string, len(names))
 	for idx, name := range names {
-		columns[idx] = d.QuoteColumn(name)
+		columns[idx] = d.QuoteColumn(d.FieldMapper(name))
 		marks[idx] = "?"
 		params[idx] = cols[name]
 	}
@@ -309,7 +309,7 @@ func (d *Duck) UpdateMap(table string, cols Params, where string, args ...any) (
 	params := make([]any, len(names))
 	marks := make([]string, len(names))
 	for idx, name := range names {
-		marks[idx] = d.QuoteColumn(name) + "=?"
+		marks[idx] = d.QuoteColumn(d.FieldMapper(name)) + "=?"
 		params[idx] = cols[name]
 	}
 
