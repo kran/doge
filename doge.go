@@ -61,10 +61,6 @@ func Reset() {
 }
 
 func compName(t reflect.Type, arr []string) string {
-	for t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
-
 	prefix := t.PkgPath() + "/" + t.Name()
 	if prefix == "/" {
 		prefix = t.String()
