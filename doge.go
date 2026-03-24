@@ -12,13 +12,13 @@ var (
 )
 
 // Provide registers a component by its type T and optional key.
-func Provide[T any](comp T, keys ...string) {
+func Provide[T any](comp T, scopes ...string) {
 	t := reflect.TypeOf((*T)(nil)).Elem()
 
 	locker.Lock()
 	defer locker.Unlock()
 
-	name := compName(t, keys)
+	name := compName(t, scopes)
 	if _, ok := comps[name]; ok {
 		panic("doge: component already exists: " + name)
 	}
@@ -26,12 +26,12 @@ func Provide[T any](comp T, keys ...string) {
 }
 
 // Resolve retrieves a component by type T and optional key. Panics if not found.
-func Resolve[T any](keys ...string) T {
+func Resolve[T any](scopes ...string) T {
 	locker.RLock()
 	defer locker.RUnlock()
 
 	t := reflect.TypeOf((*T)(nil)).Elem()
-	name := compName(t, keys)
+	name := compName(t, scopes)
 
 	if comp, ok := comps[name]; ok {
 		return comp.(T)
