@@ -2,6 +2,7 @@ package doge
 
 import (
 	"reflect"
+	"strings"
 	"sync"
 )
 
@@ -69,5 +70,5 @@ func compName(t reflect.Type, arr []string) string {
 	if len(arr) == 0 {
 		return prefix
 	}
-	return prefix + "@" + arr[0]
+	return prefix + "/" + strings.Join(arr, "/")
 }
