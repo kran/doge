@@ -70,5 +70,5 @@ func compName(t reflect.Type, arr []string) string {
 	if len(arr) == 0 {
 		return prefix
 	}
-	return prefix + "/" + strings.Join(arr, "/")
+	return prefix + "@" + strings.Join(arr, "/")
 }
