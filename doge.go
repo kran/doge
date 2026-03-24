@@ -11,8 +11,8 @@ var (
 	comps  = map[string]any{}
 )
 
-// Provide registers a component by its type T and optional key.
-func Provide[T any](comp T, scopes ...string) {
+// Set registers a component by its type T and optional key.
+func Set[T any](comp T, scopes ...string) {
 	t := reflect.TypeOf((*T)(nil)).Elem()
 
 	locker.Lock()
@@ -20,13 +20,13 @@ func Provide[T any](comp T, scopes ...string) {
 
 	name := compName(t, scopes)
 	if _, ok := comps[name]; ok {
-		panic("doge: component already exists: " + name)
+		panic("component already exists: " + name)
 	}
 	comps[name] = comp
 }
 
-// Resolve retrieves a component by type T and optional key. Panics if not found.
-func Resolve[T any](scopes ...string) T {
+// Get retrieves a component by type T and optional key. Panics if not found.
+func Get[T any](scopes ...string) T {
 	locker.RLock()
 	defer locker.RUnlock()
 
@@ -36,11 +36,11 @@ func Resolve[T any](scopes ...string) T {
 	if comp, ok := comps[name]; ok {
 		return comp.(T)
 	}
-	panic("doge: component not found: " + name)
+	panic("component not found: " + name)
 }
 
-// TryResolve attempts to retrieve a component. Returns zero value and false if not found.
-func TryResolve[T any](keys ...string) (T, bool) {
+// TryGet attempts to retrieve a component. Returns zero value and false if not found.
+func TryGet[T any](keys ...string) (T, bool) {
 	locker.RLock()
 	defer locker.RUnlock()
 
