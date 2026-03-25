@@ -2,7 +2,7 @@
 
 Type-safe DI container for Go 1.18+. Global registry, generic API, no code generation.
 
-One file, 77 lines, zero dependencies.
+One file, 75 lines, zero dependencies.
 
 ## Install
 
@@ -13,10 +13,10 @@ go get codeberg.org/kran/doge
 ## API
 
 ```go
-func Provide[T any](comp T, keys ...string)          // Register. Panics if already registered.
-func Resolve[T any](keys ...string) T                 // Retrieve. Panics if not found.
-func TryResolve[T any](keys ...string) (T, bool)      // Retrieve. Returns (zero, false) if not found.
-func Reset()                                           // Clear all. For testing.
+func Set[T any](comp T, scopes ...string)        // Register. Panics if already registered.
+func Get[T any](scopes ...string) T              // Retrieve. Panics if not found.
+func TryGet[T any](keys ...string) (T, bool)     // Retrieve. Returns (zero, false) if not found.
+func Reset()                                      // Clear all. For testing.
 ```
 
 ## Usage
@@ -24,13 +24,13 @@ func Reset()                                           // Clear all. For testing
 ```go
 // Register
 db := connectDB()
-doge.Provide[*sql.DB](db)
+doge.Set[*sql.DB](db)
 
 // Retrieve
-db := doge.Resolve[*sql.DB]()
+db := doge.Get[*sql.DB]()
 
 // Safe retrieve
-db, ok := doge.TryResolve[*sql.DB]()
+db, ok := doge.TryGet[*sql.DB]()
 ```
 
 ### Interfaces
@@ -38,9 +38,9 @@ db, ok := doge.TryResolve[*sql.DB]()
 ```go
 type UserRepo interface { Find(id int64) (*User, error) }
 
-doge.Provide[UserRepo](&PostgresUserRepo{db: db})
+doge.Set[UserRepo](&PostgresUserRepo{db: db})
 
-repo := doge.Resolve[UserRepo]()
+repo := doge.Get[UserRepo]()
 ```
 
 ### Keyed instances
@@ -48,11 +48,11 @@ repo := doge.Resolve[UserRepo]()
 Multiple instances of the same type, distinguished by key:
 
 ```go
-doge.Provide[*sql.DB](primaryDB, "primary")
-doge.Provide[*sql.DB](replicaDB, "replica")
+doge.Set[*sql.DB](primaryDB, "primary")
+doge.Set[*sql.DB](replicaDB, "replica")
 
-primary := doge.Resolve[*sql.DB]("primary")
-replica := doge.Resolve[*sql.DB]("replica")
+primary := doge.Get[*sql.DB]("primary")
+replica := doge.Get[*sql.DB]("replica")
 ```
 
 ### Testing
@@ -60,18 +60,18 @@ replica := doge.Resolve[*sql.DB]("replica")
 ```go
 func TestSomething(t *testing.T) {
     doge.Reset()
-    doge.Provide[UserRepo](&MockUserRepo{})
+    doge.Set[UserRepo](&MockUserRepo{})
     // ...
 }
 ```
 
 ## Behavior
 
-- `Provide` the same type (and key) twice: panic.
-- `Resolve` an unregistered type: panic.
-- `TryResolve` an unregistered type: returns zero value and `false`.
+- `Set` the same type (and key) twice: panic.
+- `Get` an unregistered type: panic.
+- `TryGet` an unregistered type: returns zero value and `false`.
 - All operations are goroutine-safe (`sync.RWMutex`).
-- Component names are derived from `reflect.Type`: package path + type name. Pointer types are unwrapped.
+- Component names are derived from `reflect.Type`: package path + type name. 
 
 ## What it does not do
 
