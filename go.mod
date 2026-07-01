@@ -1,3 +1,3 @@
-module codeberg.org/kran/doge
+module github.com/kran/doge
 
 go 1.24
