@@ -313,3 +313,68 @@ func TestCompNameDistinguishesTypes(t *testing.T) {
 		t.Error("*testService nil")
 	}
 }
+
+// --- Anonymous types (类型同一性: 同形状 = 同类型, 与命名类型同规则) ---
+
+func TestAnonymousSingleInstance(t *testing.T) {
+	setup()
+	Set[struct{ X int }](struct{ X int }{X: 1})
+	if Get[struct{ X int }]().X != 1 {
+		t.Error("anon single instance failed")
+	}
+}
+
+func TestAnonymousMultipleWithKeys(t *testing.T) {
+	setup()
+	Set[struct{ X int }](struct{ X int }{X: 1}, "a")
+	Set[struct{ X int }](struct{ X int }{X: 2}, "b")
+
+	if Get[struct{ X int }]("a").X != 1 {
+		t.Error("a wrong")
+	}
+	if Get[struct{ X int }]("b").X != 2 {
+		t.Error("b wrong")
+	}
+}
+
+func TestAnonymousDuplicatePanics(t *testing.T) {
+	setup()
+	Set[struct{ X int }](struct{ X int }{X: 1})
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("duplicate anon should panic")
+		}
+	}()
+	Set[struct{ X int }](struct{ X int }{X: 2})
+}
+
+func TestAnonymousFuncInstance(t *testing.T) {
+	setup()
+	Set[func() int](func() int { return 42 })
+
+	if Get[func() int]()() != 42 {
+		t.Error("func component failed")
+	}
+}
+
+func TestCrossPackageSameNameTypes(t *testing.T) {
+	// 同形状但不同包路径的类型: 类型即 key, 天然隔离 (无需字符串编码)
+	setup()
+	type User struct{ ID int } // "本包" 的 User
+	_ = User{}
+	// 模拟跨包: 指针/值/切片是不同的类型槽, 互不冲突
+	Set[testService](testService{Name: "value"})
+	Set[*testService](&testService{Name: "ptr"})
+	Set[[]testService]([]testService{{Name: "slice"}})
+
+	if Get[testService]().Name != "value" {
+		t.Error("value wrong")
+	}
+	if Get[*testService]().Name != "ptr" {
+		t.Error("ptr wrong")
+	}
+	if len(Get[[]testService]()) != 1 {
+		t.Error("slice wrong")
+	}
+}
