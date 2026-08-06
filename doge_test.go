@@ -89,16 +89,49 @@ func TestProvideLazyMemoizedOrderIndependent(t *testing.T) {
 
 func TestProvideCyclePanicsWithChain(t *testing.T) {
 	defer Reset()
-	Provide(func() *svcB { return &svcB{} })
-	Provide(func() *svcC { Get[*svcB](); return &svcC{} })
-	// 制造环: A → C → A
-	Provide(func() *svcA { Get[*svcC](); return &svcA{} })
-	Replace(&svcC{}) // 清掉上面的 C, 重建带环版本
-	Reset()
-
+	// A → C → A: 同 goroutine 再入 stateBuilding = 真环, 报 cycle 附完整链
 	Provide(func() *svcA { Get[*svcC](); return &svcA{} })
 	Provide(func() *svcC { Get[*svcA](); return &svcC{} })
 	mustPanic(t, "cycle", func() { Get[*svcA]() })
+}
+
+func TestConcurrentBuildDetectedNotMisreportedAsCycle(t *testing.T) {
+	defer Reset()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+
+	Provide(func() *svcA { close(entered); <-release; return &svcA{} })
+
+	go func() {
+		defer close(done)
+		Get[*svcA]() // goroutine 1: 进入构造并阻塞
+	}()
+	<-entered
+
+	// goroutine 0 (main): 撞见 stateBuilding, 不同 goid → 报并发而非环
+	mustPanic(t, "concurrent", func() { Get[*svcA]() })
+
+	close(release)
+	<-done // 等构造完成再 Reset, 避免后台 goroutine 触碰已清空的解析链
+}
+
+func TestBrokenFuse(t *testing.T) {
+	defer Reset()
+	Provide(func() *svcA { panic("boom") })
+
+	mustPanic(t, "boom", func() { Get[*svcA]() }) // 用户 panic 原样重抛
+	// 此后容器进入 broken: 一切操作明确拒绝, 而非未定义行为
+	mustPanic(t, "broken", func() { Get[*svcA]() })
+	mustPanic(t, "broken", func() { TryGet[*svcA]() })
+	mustPanic(t, "broken", func() { Set(&svcB{}) })
+	mustPanic(t, "broken", Seal)
+
+	Reset() // Reset 清除 broken (测试场景)
+	Set(&svcA{n: 1})
+	if Get[*svcA]().n != 1 {
+		t.Fatal("reset must clear broken state")
+	}
 }
 
 func TestSealForcesResolutionAndFreezes(t *testing.T) {

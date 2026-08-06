@@ -15,7 +15,11 @@
 //     就是该组件的依赖清单, 可见性与手动传参相差无几。
 //
 // 并发约定: 装配期 (Seal 之前的 Set/Provide/Get) 默认单 goroutine —
-// 这是 main 函数的自然形态, 环检测也依赖它; Seal 之后 TryGet 并发安全。
+// 这是 main 函数的自然形态; Seal 之后 TryGet 并发安全。跨 goroutine
+// 并发触发同一惰性构造会被检测并 panic (而非误报为循环依赖)。
+//
+// 失败即终止: 构造函数 panic 视为装配失败, 容器进入 broken 状态并拒绝
+// 一切后续操作 — 装配失败的正确响应是进程终止, 不是恢复。
 //
 // 典型 main:
 //
@@ -31,7 +35,9 @@ package doge
 
 import (
 	"reflect"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -41,7 +47,7 @@ type state uint8
 const (
 	stateReady    state = iota // val 可用
 	stateLazy                  // provider 未执行
-	stateBuilding              // provider 执行中 (再次进入 = 环)
+	stateBuilding              // provider 执行中 (同 goroutine 再入 = 环; 跨 goroutine = 并发误用)
 )
 
 type entry struct {
@@ -53,12 +59,18 @@ type entry struct {
 var (
 	mu     sync.RWMutex
 	sealed bool
+	// broken: 某个构造函数 panic 后置位。此后一切操作 panic —
+	// 半装配的容器状态未定义, 明确拒绝服务优于静默带病运行。
+	broken bool
 	// comps: 类型 → key → 组件。类型直接作 map key (底层 *rtype 指针,
 	// 类型同一性 = 指针同一性): 零编码、零冲突、匿名类型自动处理。
 	comps = map[reflect.Type]map[string]*entry{}
 	// resolving: 构建中的解析链, 用于环检测与报错信息。
-	// 依赖装配期单 goroutine 约定 (见包注释)。
 	resolving []string
+	// resolvingG: 当前构建链所属 goroutine (0 = 无构建中)。
+	// stateBuilding 撞见时据此区分: 同 goroutine = 真循环依赖,
+	// 跨 goroutine = 并发触发惰性构造 (装配期单 goroutine 约定被违反)。
+	resolvingG int64
 )
 
 // Set registers a ready component under type T and an optional key.
@@ -72,7 +84,16 @@ func Set[T any](comp T, key ...string) {
 //
 // Provide 让注册顺序与依赖顺序解耦: 构造函数里 Get 的依赖若尚未物化,
 // 会被递归按需构造。循环依赖在解析时 panic 并给出完整依赖链。
-// fn 一旦 panic 视为装配失败 (进程应终止), 容器不保证此后仍可用。
+//
+// 守则:
+//   - Provide 与 Seal 成对使用: 惰性构造按装配期单 goroutine 设计,
+//     不 Seal 就进入并发阶段, 两个 goroutine 并发触发同一构造会 panic
+//     (且已构造一半的实例可能泄漏)。Seal 把全部构造做完, 运行期纯读。
+//   - 不要在构造函数内 Set/Provide 注册组件 — 组件清单应在 main 里
+//     一眼看全, 藏在构造函数里的注册破坏依赖可见性 (Seal 的重扫在
+//     技术上容忍它, 但这属于"能跑不等于该用")。
+//   - fn 一旦 panic 视为装配失败, 容器进入 broken 状态拒绝一切后续
+//     操作 — 进程应当终止, 不要 recover 后继续使用容器。
 func Provide[T any](fn func() T, key ...string) {
 	if fn == nil {
 		panic("doge: Provide with nil constructor: " + displayName(typeOf[T](), oneKey(key)))
@@ -129,6 +150,10 @@ func TryGet[T any](key ...string) (T, bool) {
 func Seal() {
 	for {
 		mu.Lock()
+		if broken {
+			mu.Unlock()
+			panicBroken()
+		}
 		if sealed {
 			mu.Unlock()
 			return
@@ -140,7 +165,7 @@ func Seal() {
 			return
 		}
 		mu.Unlock()
-		resolve(t, k) // 物化; 其构造函数可能连带解析/注册其他组件, 故循环重扫
+		resolve(t, k) // 物化; 其构造函数可能连带解析其他组件, 故循环重扫
 	}
 }
 
@@ -156,14 +181,17 @@ func findPending() (reflect.Type, string, bool) {
 	return nil, "", false
 }
 
-// Reset clears all components and un-seals the container. For tests only.
-// 与 t.Parallel 天然冲突 (全局容器的固有代价) — 并行测试请勿共享容器状态。
+// Reset clears all components and un-seals / un-breaks the container.
+// For tests only. 与 t.Parallel 天然冲突 (全局容器的固有代价) —
+// 并行测试请勿共享容器状态。
 func Reset() {
 	mu.Lock()
 	defer mu.Unlock()
 	comps = map[reflect.Type]map[string]*entry{}
 	resolving = nil
+	resolvingG = 0
 	sealed = false
+	broken = false
 }
 
 // ── internals ────────────────────────────────────────────
@@ -182,9 +210,18 @@ func oneKey(keys []string) string {
 	panic("doge: at most one key allowed, got: " + strings.Join(keys, ", "))
 }
 
+// panicBroken 报 broken。锁契约: 调用方必须已释放 mu —
+// broken 检查一律"锁内读、锁外炸", 在临界区内 panic 会永久持锁
+func panicBroken() {
+	panic("doge: container broken by an earlier constructor panic — restart the process")
+}
+
 func register(t reflect.Type, key string, e *entry, override bool) {
 	mu.Lock()
 	defer mu.Unlock()
+	if broken {
+		panicBroken()
+	}
 	if sealed {
 		panic("doge: register after Seal: " + displayName(t, key))
 	}
@@ -202,10 +239,17 @@ func register(t reflect.Type, key string, e *entry, override bool) {
 
 // resolve 取值, lazy 条目按需构造 (memoized)。
 // 锁纪律: provider 执行期间不持锁 — 构造函数会递归 Get 依赖,
-// 持锁会自锁死。环检测靠 stateBuilding: 同一条目在构建中被再次
-// 解析即为循环依赖 (装配期单 goroutine 约定下无误报)。
+// 持锁会自锁死。stateBuilding 撞见时按 goroutine 区分两种病:
+// 同 goroutine 再入 = 循环依赖 (附完整链); 跨 goroutine = 并发触发
+// 惰性构造 (违反装配期单 goroutine 约定, 提示调用 Seal)。
+// provider panic 时置 broken 后原样重抛 — 不回滚、不修剪解析链,
+// broken 状态使残留的中间状态不可达。
 func resolve(t reflect.Type, key string) (any, bool) {
 	mu.Lock()
+	if broken {
+		mu.Unlock()
+		panicBroken()
+	}
 	e := comps[t][key] // nil map 索引安全
 	if e == nil {
 		mu.Unlock()
@@ -217,25 +261,60 @@ func resolve(t reflect.Type, key string) (any, bool) {
 		mu.Unlock()
 		return v, true
 	case stateBuilding:
-		chain := strings.Join(append(append([]string{}, resolving...),
-			displayName(t, key)), " → ")
+		if goid() == resolvingG {
+			chain := strings.Join(append(append([]string{}, resolving...),
+				displayName(t, key)), " → ")
+			mu.Unlock()
+			panic("doge: provider cycle: " + chain)
+		}
 		mu.Unlock()
-		panic("doge: provider cycle: " + chain)
+		panic("doge: concurrent lazy construction of " + displayName(t, key) +
+			" — resolve all Provide'd components before going concurrent (call Seal first)")
 	}
 
 	// stateLazy → 构建
 	e.state = stateBuilding
+	if len(resolving) == 0 {
+		resolvingG = goid()
+	}
 	resolving = append(resolving, displayName(t, key))
 	provider := e.provider
 	mu.Unlock()
 
+	defer func() {
+		if r := recover(); r != nil {
+			mu.Lock()
+			broken = true // 装配失败: 冻结为拒绝服务, 见 checkBroken
+			mu.Unlock()
+			panic(r) // 原样重抛, 不吞用户 panic
+		}
+	}()
 	v := provider() // 可能递归 resolve 依赖
 
 	mu.Lock()
 	e.val, e.state, e.provider = v, stateReady, nil
 	resolving = resolving[:len(resolving)-1]
+	if len(resolving) == 0 {
+		resolvingG = 0
+	}
 	mu.Unlock()
 	return v, true
+}
+
+// goid 当前 goroutine id — 仅用于 stateBuilding 冷路径的病因区分,
+// 不参与任何热路径。runtime.Stack 首行 "goroutine N [running]:" 的
+// 解析是各版本稳定的惯用法; Go 无公开 API 属有意设计, 这里的用途
+// (区分报错文案) 不构成对 goroutine 身份的逻辑依赖。
+func goid() int64 {
+	var buf [32]byte
+	n := runtime.Stack(buf[:], false)
+	s := strings.TrimPrefix(string(buf[:n]), "goroutine ")
+	if i := strings.IndexByte(s, ' '); i > 0 {
+		if id, err := strconv.ParseInt(s[:i], 10, 64); err == nil {
+			return id
+		}
+	}
+	return -1 // 解析失败: 保守返回不等于任何 resolvingG 的值 → 报并发而非环
 }
 
 // notFoundMsg 未找到时的报错: 附带该类型已注册的 key 列表,
