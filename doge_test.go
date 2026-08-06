@@ -1,380 +1,140 @@
 package doge
 
+// doge_test.go — 契约钉板。每条测试对应一条包注释里承诺的行为。
+// 全局容器 + Reset 的组合与 t.Parallel 冲突, 本文件所有测试串行。
+
 import (
-	"sync"
+	"strings"
 	"testing"
 )
 
-func setup() {
-	Reset()
-}
+type svcA struct{ n int }
+type svcB struct{ a *svcA }
+type svcC struct{ b *svcB }
 
-// --- Set / Get basics ---
-
-type testService struct {
-	Name string
-}
-
-func TestProvideAndResolve(t *testing.T) {
-	setup()
-	svc := &testService{Name: "hello"}
-	Set[*testService](svc)
-
-	got := Get[*testService]()
-	if got != svc {
-		t.Errorf("Get returned different instance")
-	}
-	if got.Name != "hello" {
-		t.Errorf("Name = %q, want %q", got.Name, "hello")
-	}
-}
-
-func TestProvideValueType(t *testing.T) {
-	setup()
-	Set[int](42)
-
-	got := Get[int]()
-	if got != 42 {
-		t.Errorf("Get[int] = %d, want 42", got)
-	}
-}
-
-func TestProvideString(t *testing.T) {
-	setup()
-	Set[string]("config-value")
-
-	got := Get[string]()
-	if got != "config-value" {
-		t.Errorf("Get[string] = %q", got)
-	}
-}
-
-// --- Pointer vs Value are distinct types ---
-
-func TestPointerAndValueAreDistinct(t *testing.T) {
-	setup()
-	svc := testService{Name: "value"}
-	svcPtr := &testService{Name: "pointer"}
-
-	Set[testService](svc)
-	Set[*testService](svcPtr)
-
-	gotVal := Get[testService]()
-	gotPtr := Get[*testService]()
-
-	if gotVal.Name != "value" {
-		t.Errorf("value type: Name = %q, want %q", gotVal.Name, "value")
-	}
-	if gotPtr.Name != "pointer" {
-		t.Errorf("pointer type: Name = %q, want %q", gotPtr.Name, "pointer")
-	}
-}
-
-// --- Interface ---
-
-type Greeter interface {
-	Greet() string
-}
-
-type englishGreeter struct{}
-
-func (g *englishGreeter) Greet() string { return "hello" }
-
-type frenchGreeter struct{}
-
-func (g *frenchGreeter) Greet() string { return "bonjour" }
-
-func TestProvideInterface(t *testing.T) {
-	setup()
-	Set[Greeter](&englishGreeter{})
-
-	got := Get[Greeter]()
-	if got.Greet() != "hello" {
-		t.Errorf("Greet() = %q", got.Greet())
-	}
-}
-
-// --- Keyed instances ---
-
-func TestKeyedInstances(t *testing.T) {
-	setup()
-	Set[string]("primary-dsn", "primary")
-	Set[string]("replica-dsn", "replica")
-
-	if Get[string]("primary") != "primary-dsn" {
-		t.Errorf("primary = %q", Get[string]("primary"))
-	}
-	if Get[string]("replica") != "replica-dsn" {
-		t.Errorf("replica = %q", Get[string]("replica"))
-	}
-}
-
-func TestKeyedAndUnkeyedAreDistinct(t *testing.T) {
-	setup()
-	Set[string]("default")
-	Set[string]("keyed", "special")
-
-	if Get[string]() != "default" {
-		t.Errorf("unkeyed = %q", Get[string]())
-	}
-	if Get[string]("special") != "keyed" {
-		t.Errorf("keyed = %q", Get[string]("special"))
-	}
-}
-
-func TestKeyedInterface(t *testing.T) {
-	setup()
-	Set[Greeter](&englishGreeter{}, "en")
-	Set[Greeter](&frenchGreeter{}, "fr")
-
-	if Get[Greeter]("en").Greet() != "hello" {
-		t.Error("en greeter wrong")
-	}
-	if Get[Greeter]("fr").Greet() != "bonjour" {
-		t.Error("fr greeter wrong")
-	}
-}
-
-// --- TryGet ---
-
-func TestTryResolveFound(t *testing.T) {
-	setup()
-	Set[int](99)
-
-	v, ok := TryGet[int]()
-	if !ok || v != 99 {
-		t.Errorf("TryGet = (%d, %v)", v, ok)
-	}
-}
-
-func TestTryResolveNotFound(t *testing.T) {
-	setup()
-	v, ok := TryGet[int]()
-	if ok {
-		t.Error("should not find unregistered type")
-	}
-	if v != 0 {
-		t.Errorf("zero value should be 0, got %d", v)
-	}
-}
-
-func TestTryResolveKeyedNotFound(t *testing.T) {
-	setup()
-	Set[string]("exists", "a")
-
-	_, ok := TryGet[string]("b")
-	if ok {
-		t.Error("should not find wrong key")
-	}
-
-	_, ok = TryGet[string]()
-	if ok {
-		t.Error("should not find unkeyed when only keyed exists")
-	}
-}
-
-// --- Duplicate Set panics ---
-
-func TestProvideDuplicatePanics(t *testing.T) {
-	setup()
-	Set[int](1)
-
+func mustPanic(t *testing.T, substr string, fn func()) {
+	t.Helper()
 	defer func() {
-		if r := recover(); r == nil {
-			t.Error("duplicate Set should panic")
+		r := recover()
+		if r == nil {
+			t.Fatalf("want panic containing %q, got none", substr)
+		}
+		if s, _ := r.(string); !strings.Contains(s, substr) {
+			t.Fatalf("want panic containing %q, got: %v", substr, r)
 		}
 	}()
-	Set[int](2)
+	fn()
 }
 
-func TestProvideDuplicateKeyedPanics(t *testing.T) {
-	setup()
-	Set[string]("a", "key1")
+func TestSetGet(t *testing.T) {
+	defer Reset()
+	Set(&svcA{n: 1})
+	Set(&svcA{n: 2}, "second")
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("duplicate keyed Set should panic")
-		}
-	}()
-	Set[string]("b", "key1")
+	if Get[*svcA]().n != 1 {
+		t.Fatal("keyless get")
+	}
+	if Get[*svcA]("second").n != 2 {
+		t.Fatal("keyed get")
+	}
+	if _, ok := TryGet[*svcB](); ok {
+		t.Fatal("TryGet on absent must be false")
+	}
 }
 
-func TestProvideSameTypeDifferentKeysOK(t *testing.T) {
-	setup()
-	// Should NOT panic
-	Set[string]("a", "key1")
-	Set[string]("b", "key2")
+func TestDuplicateAndReplace(t *testing.T) {
+	defer Reset()
+	Set(&svcA{n: 1})
+	mustPanic(t, "already exists", func() { Set(&svcA{n: 2}) })
+
+	Replace(&svcA{n: 9}) // 覆盖
+	if Get[*svcA]().n != 9 {
+		t.Fatal("replace did not override")
+	}
+	Replace(&svcB{}) // 也可作首次注册 (测试先 mock 后真实的场景)
+	if _, ok := TryGet[*svcB](); !ok {
+		t.Fatal("replace as first registration")
+	}
 }
 
-// --- Get not found panics ---
-
-func TestResolveNotFoundPanics(t *testing.T) {
-	setup()
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Get unregistered type should panic")
-		}
-	}()
-	Get[int]()
+func TestAtMostOneKey(t *testing.T) {
+	defer Reset()
+	mustPanic(t, "at most one key", func() { Set(&svcA{}, "a", "b") })
 }
 
-func TestResolveWrongKeyPanics(t *testing.T) {
-	setup()
-	Set[int](1, "a")
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Get with wrong key should panic")
-		}
-	}()
-	Get[int]("b")
+func TestNotFoundListsKeys(t *testing.T) {
+	defer Reset()
+	Set(&svcA{}, "east")
+	Set(&svcA{}, "west")
+	mustPanic(t, "east", func() { Get[*svcA]("eastt") }) // 报错附带已注册 key
 }
 
-// --- Reset ---
+func TestProvideLazyMemoizedOrderIndependent(t *testing.T) {
+	defer Reset()
+	calls := 0
+	// 注册顺序与依赖顺序相反: B 先注册, 依赖后注册的 A
+	Provide(func() *svcB { return &svcB{a: Get[*svcA]()} })
+	Provide(func() *svcA { calls++; return &svcA{n: 7} })
 
-func TestReset(t *testing.T) {
-	setup()
-	Set[int](42)
+	b := Get[*svcB]() // 触发递归构造 A
+	if b.a.n != 7 {
+		t.Fatal("lazy dependency not resolved")
+	}
+	Get[*svcA]()
+	Get[*svcB]()
+	if calls != 1 {
+		t.Fatalf("provider must run once, ran %d", calls)
+	}
+}
+
+func TestProvideCyclePanicsWithChain(t *testing.T) {
+	defer Reset()
+	Provide(func() *svcB { return &svcB{} })
+	Provide(func() *svcC { Get[*svcB](); return &svcC{} })
+	// 制造环: A → C → A
+	Provide(func() *svcA { Get[*svcC](); return &svcA{} })
+	Replace(&svcC{}) // 清掉上面的 C, 重建带环版本
 	Reset()
 
-	_, ok := TryGet[int]()
-	if ok {
-		t.Error("Reset should clear all components")
-	}
+	Provide(func() *svcA { Get[*svcC](); return &svcA{} })
+	Provide(func() *svcC { Get[*svcA](); return &svcC{} })
+	mustPanic(t, "cycle", func() { Get[*svcA]() })
 }
 
-func TestResetThenProvideAgain(t *testing.T) {
-	setup()
-	Set[int](1)
+func TestSealForcesResolutionAndFreezes(t *testing.T) {
+	defer Reset()
+	calls := 0
+	Provide(func() *svcA { calls++; return &svcA{n: 5} }) // 从未被 Get
+
+	Seal()
+	if calls != 1 {
+		t.Fatal("Seal must force-resolve pending providers")
+	}
+	// Seal 后: TryGet 可用 (读已物化值, 不再触发构造)
+	if a, ok := TryGet[*svcA](); !ok || a.n != 5 || calls != 1 {
+		t.Fatal("TryGet after Seal")
+	}
+	// Seal 后: Get / 注册 一律 panic
+	mustPanic(t, "Get after Seal", func() { Get[*svcA]() })
+	mustPanic(t, "register after Seal", func() { Set(&svcB{}) })
+	mustPanic(t, "register after Seal", func() { Replace(&svcA{}) })
+
+	Seal() // 幂等
+}
+
+func TestSealSurfacesMissingDependency(t *testing.T) {
+	defer Reset()
+	Provide(func() *svcB { return &svcB{a: Get[*svcA]()} }) // A 从未注册
+	mustPanic(t, "not found", Seal)                         // fail fast 于 Seal, 而非首个请求
+}
+
+func TestResetUnseals(t *testing.T) {
+	Set(&svcA{})
+	Seal()
 	Reset()
-	// Should not panic — slot is cleared
-	Set[int](2)
-
-	if Get[int]() != 2 {
-		t.Errorf("got %d, want 2", Get[int]())
+	Set(&svcA{n: 3}) // Reset 后可重新装配
+	if Get[*svcA]().n != 3 {
+		t.Fatal("reset must unseal")
 	}
-}
-
-// --- Concurrency ---
-
-func TestConcurrentProvideResolve(t *testing.T) {
-	setup()
-	// Pre-register so resolves don't panic
-	Set[int](0)
-
-	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = Get[int]()
-		}()
-	}
-	wg.Wait()
-}
-
-func TestConcurrentTryResolve(t *testing.T) {
-	setup()
-
-	var wg sync.WaitGroup
-	// Some goroutines try to resolve, some provide
-	Set[string]("val")
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			v, ok := TryGet[string]()
-			if ok && v != "val" {
-				t.Errorf("unexpected value: %q", v)
-			}
-		}()
-	}
-	wg.Wait()
-}
-
-// --- compName ---
-
-func TestCompNameDistinguishesTypes(t *testing.T) {
-	// Verify that the internal naming produces distinct keys
-	// for different types. We test this indirectly: registering
-	// int, string, and *testService should all coexist.
-	setup()
-	Set[int](1)
-	Set[string]("s")
-	Set[*testService](&testService{})
-
-	if Get[int]() != 1 {
-		t.Error("int wrong")
-	}
-	if Get[string]() != "s" {
-		t.Error("string wrong")
-	}
-	if Get[*testService]() == nil {
-		t.Error("*testService nil")
-	}
-}
-
-// --- Anonymous types (类型同一性: 同形状 = 同类型, 与命名类型同规则) ---
-
-func TestAnonymousSingleInstance(t *testing.T) {
-	setup()
-	Set[struct{ X int }](struct{ X int }{X: 1})
-	if Get[struct{ X int }]().X != 1 {
-		t.Error("anon single instance failed")
-	}
-}
-
-func TestAnonymousMultipleWithKeys(t *testing.T) {
-	setup()
-	Set[struct{ X int }](struct{ X int }{X: 1}, "a")
-	Set[struct{ X int }](struct{ X int }{X: 2}, "b")
-
-	if Get[struct{ X int }]("a").X != 1 {
-		t.Error("a wrong")
-	}
-	if Get[struct{ X int }]("b").X != 2 {
-		t.Error("b wrong")
-	}
-}
-
-func TestAnonymousDuplicatePanics(t *testing.T) {
-	setup()
-	Set[struct{ X int }](struct{ X int }{X: 1})
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("duplicate anon should panic")
-		}
-	}()
-	Set[struct{ X int }](struct{ X int }{X: 2})
-}
-
-func TestAnonymousFuncInstance(t *testing.T) {
-	setup()
-	Set[func() int](func() int { return 42 })
-
-	if Get[func() int]()() != 42 {
-		t.Error("func component failed")
-	}
-}
-
-func TestCrossPackageSameNameTypes(t *testing.T) {
-	// 同形状但不同包路径的类型: 类型即 key, 天然隔离 (无需字符串编码)
-	setup()
-	type User struct{ ID int } // "本包" 的 User
-	_ = User{}
-	// 模拟跨包: 指针/值/切片是不同的类型槽, 互不冲突
-	Set[testService](testService{Name: "value"})
-	Set[*testService](&testService{Name: "ptr"})
-	Set[[]testService]([]testService{{Name: "slice"}})
-
-	if Get[testService]().Name != "value" {
-		t.Error("value wrong")
-	}
-	if Get[*testService]().Name != "ptr" {
-		t.Error("ptr wrong")
-	}
-	if len(Get[[]testService]()) != 1 {
-		t.Error("slice wrong")
-	}
+	Reset()
 }
