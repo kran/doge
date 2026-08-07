@@ -5,6 +5,7 @@ package doge
 
 import (
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -170,4 +171,74 @@ func TestResetUnseals(t *testing.T) {
 		t.Fatal("reset must unseal")
 	}
 	Reset()
+}
+
+// ── 状态机穷举补充 ──────────────────────────────────────
+
+// Seal 后 TryGet 并发安全: 注释声称的行为, 用 race 证明。
+func TestSealConcurrentTryGet(t *testing.T) {
+	defer Reset()
+	Set(&svcA{n: 1})
+	Provide(func() *svcB { return &svcB{} })
+	Seal()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if a, ok := TryGet[*svcA](); !ok || a.n != 1 {
+				t.Errorf("TryGet after Seal: %v %v", a, ok)
+			}
+			if _, ok := TryGet[*svcB](); !ok {
+				t.Error("TryGet lazy materialized by Seal")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// 嵌套依赖链: C→B→A 三层 (现有 svcC→svcB→svcA), resolving 链进出正确,
+// 每组件只构造一次。
+func TestNestedDependencyChain(t *testing.T) {
+	defer Reset()
+	order := []string{}
+	Provide(func() *svcC { order = append(order, "C"); return &svcC{b: Get[*svcB]()} })
+	Provide(func() *svcB { order = append(order, "B"); return &svcB{a: Get[*svcA]()} })
+	Provide(func() *svcA { order = append(order, "A"); return &svcA{n: 7} })
+
+	c := Get[*svcC]() // 触发整链: A → B → C
+	if c == nil || c.b == nil || c.b.a == nil || c.b.a.n != 7 {
+		t.Fatal("chain not wired")
+	}
+	// provider 的 append 在函数体开头: 开始序 = 外层先开始 = [C, B, A]
+	if len(order) != 3 || order[0] != "C" || order[1] != "B" || order[2] != "A" {
+		t.Fatalf("construction order: %v", order)
+	}
+	// 再次 Get: 全物化, 不再构造
+	Get[*svcC]()
+	if len(order) != 3 {
+		t.Fatalf("providers must run once: %v", order)
+	}
+}
+
+// Seal 循环重扫: 构造函数里注册新组件 (技术容忍路径)。
+func TestSealRescanOnRegister(t *testing.T) {
+	defer Reset()
+	Provide(func() *svcA { Set(&svcC{}); return &svcA{n: 1} }) // 构造时注册 C
+	Seal()                                                     // 重扫应物化 C
+	if _, ok := TryGet[*svcC](); !ok {
+		t.Fatal("Seal should rescan and materialize constructor-registered C")
+	}
+	if _, ok := TryGet[*svcA](); !ok {
+		t.Fatal("A should be materialized")
+	}
+}
+
+// nil provider: panic 带类型名。
+func TestProvideNilPanics(t *testing.T) {
+	defer Reset()
+	mustPanic(t, "nil constructor", func() {
+		Provide[*svcA](nil)
+	})
 }
